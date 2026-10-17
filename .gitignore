@@ -1,0 +1,4 @@
+bin/
+Data/
+test-data/
+*.user
