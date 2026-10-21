@@ -75,8 +75,70 @@ namespace WindowHome
     public class AppOptions
     {
         public bool Learning = true, RestoreWake = true, RestoreDisplay = true, RestoreNew = true, Paused;
+        public bool AutoRestore = true;
+        public int LearningIntervalSeconds = 30, StableSeconds = 5, NewWindowDelaySeconds = 2;
+        [XmlIgnore] public bool CanLearn { get { return Learning && !Paused; } }
+        [XmlIgnore] public bool CanRestore { get { return AutoRestore && !Paused; } }
         public string RestoreHotkey = "Ctrl+Alt+R", SaveHotkey = "Ctrl+Alt+S";
         public List<string> Excluded = new List<string>();
+    }
+    public static class LayoutEditing
+    {
+        public static LayoutSnapshot Merge(LayoutSnapshot saved, LayoutSnapshot current)
+        {
+            var merged = current.Copy(); merged.Id = saved.Id; merged.Name = saved.Name;
+            var previous = saved.Windows.Select(w => w.Copy()).ToList();
+            foreach (var w in previous)
+            {
+                if (saved.Topology != current.Topology && current.Displays.Count > 0)
+                {
+                    var display = Geometry.TargetDisplay(w, current.Displays); w.Rect = Geometry.Map(w, current.Displays);
+                    w.DisplayId = display.Id; w.Work = display.Work.Copy(); w.Dpi = display.Dpi;
+                }
+                w.DesktopId = current.DesktopId;
+            }
+            var matches = Matcher.Match(previous, current.Windows, false);
+            var used = new HashSet<long>(matches.Where(m => m.Live != null).Select(m => m.Live.Handle));
+            merged.Windows = matches.Select(m => (m.Live ?? m.Saved).Copy()).ToList();
+            foreach (var group in current.Windows.Where(w => !used.Contains(w.Handle)).GroupBy(w => w.AppKey + "|" + w.Title))
+            {
+                // Unidentifiable identical-title windows retain their existing slots instead of growing on every save.
+                int existing = matches.Count(m => m.Live == null && m.Saved.AppKey + "|" + m.Saved.Title == group.Key);
+                merged.Windows.AddRange(group.Skip(existing).Select(w => w.Copy()));
+            }
+            foreach (var group in merged.Windows.GroupBy(w => w.AppKey)) foreach (var w in group) w.AppWindowCount = group.Count();
+            return merged;
+        }
+    }
+    public sealed class NewWindowTracker
+    {
+        private sealed class Entry { public DateTime ChangedAt; public string Geometry; }
+        private readonly HashSet<string> known = new HashSet<string>();
+        private readonly Dictionary<string, Entry> waiting = new Dictionary<string, Entry>();
+        public bool HasWaiting { get { return waiting.Count > 0; } }
+        private static string Key(WindowRecord w) { return w.Handle + ":" + w.Pid + ":" + w.ProcessStarted; }
+        public void Reset(LayoutSnapshot snapshot)
+        {
+            known.Clear(); waiting.Clear(); foreach (var w in snapshot.Windows) known.Add(Key(w));
+        }
+        public List<WindowRecord> Observe(LayoutSnapshot snapshot, DateTime now, int delaySeconds)
+        {
+            var present = new HashSet<string>(snapshot.Windows.Select(Key));
+            known.RemoveWhere(k => !present.Contains(k));
+            foreach (var k in waiting.Keys.Where(k => !present.Contains(k)).ToList()) waiting.Remove(k);
+            var ready = new List<WindowRecord>();
+            foreach (var w in snapshot.Windows)
+            {
+                string key = Key(w), geometry = w.Rect + ":" + w.State;
+                if (known.Contains(key)) continue;
+                Entry entry;
+                if (!waiting.TryGetValue(key, out entry)) waiting[key] = new Entry { ChangedAt = now, Geometry = geometry };
+                else if (entry.Geometry != geometry) { entry.Geometry = geometry; entry.ChangedAt = now; }
+                else if ((now - entry.ChangedAt).TotalSeconds >= Math.Max(1, delaySeconds))
+                { ready.Add(w); waiting.Remove(key); known.Add(key); }
+            }
+            return ready;
+        }
     }
     public static class AppRules
     {

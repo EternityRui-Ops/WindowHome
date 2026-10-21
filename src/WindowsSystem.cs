@@ -152,6 +152,9 @@ namespace WindowHome
             uint thread = Native.GetWindowThreadProcessId(h, out Native.unusedPid);
             var gui = new Native.GUITHREADINFO(); gui.cbSize = Marshal.SizeOf(gui);
             if (Native.GetGUIThreadInfo(thread, ref gui) && (gui.flags & 2) != 0) return "窗口正在拖动或缩放，已跳过";
+            // A normal new window only needs one asynchronous move; re-showing it causes visible startup flicker.
+            if (saved.State == 1 && !Native.IsIconic(h) && !Native.IsZoomed(h))
+                return Native.SetWindowPos(h, IntPtr.Zero, target.X, target.Y, target.Width, target.Height, 0x4000 | 0x10 | 0x4 | 0x200) ? "" : Error("设置位置");
             var p = Native.Placement(); p.flags = 4u | (saved.RestoreToMax && saved.State == 2 ? 2u : 0u);
             p.showCmd = saved.State == 3 ? 3u : saved.State == 2 ? 7u : 4u;
             p.ptMinPosition = new Native.POINT(-1, -1); p.ptMaxPosition = new Native.POINT(-1, -1);
@@ -167,7 +170,7 @@ namespace WindowHome
         }
         public bool Verify(WindowRecord live, WindowRecord saved, PixelRect target, DisplayRecord display)
         {
-            if (!IsCurrent(live)) return false;
+            if (!IsCurrent(live) || live.Fullscreen || Native.IsHungAppWindow(new IntPtr(live.Handle))) return false;
             IntPtr h = new IntPtr(live.Handle); var p = Native.Placement();
             if (!Native.GetWindowPlacement(h, ref p)) return false;
             int state = Native.IsIconic(h) ? 2 : Native.IsZoomed(h) ? 3 : 1;

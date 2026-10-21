@@ -20,7 +20,7 @@ using Forms = System.Windows.Forms;
 
 [assembly: AssemblyTitle("窗归 WindowHome")]
 [assembly: AssemblyDescription("本地窗口布局记忆与核验恢复工具")]
-[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("WindowHome.Tests")]
 
 namespace WindowHome
@@ -89,11 +89,9 @@ namespace WindowHome
         private bool hasBaseline;
         private DateTime transitionUntil;
         private string lastTopology = "", lastDesktop = "", transitionReason = "";
-        private HashSet<string> known = new HashSet<string>();
-        private readonly Dictionary<string, DateTime> born = new Dictionary<string, DateTime>();
+        private readonly NewWindowTracker newWindows = new NewWindowTracker();
         private LayoutSnapshot current;
         private T Find<T>(string name) where T : class { return window.FindName(name) as T; }
-        private static string Instance(WindowRecord w) { return w.Handle + ":" + w.Pid + ":" + w.ProcessStarted; }
         public MainController(Application app, string path, bool isolated, bool background, uint showMessage, HashSet<int> testProcesses)
         {
             this.app = app; this.isolated = isolated; this.showMessage = showMessage;
@@ -175,9 +173,7 @@ namespace WindowHome
             });
             OnClick("UpdateLayoutButton", async delegate
             {
-                var old = RequireLayout(); await RefreshCurrent();
-                var update = service.SaveNamed(current, old.Name); data.Layouts.Remove(old); update.Id = old.Id;
-                learning.Commit(current); Persist(); RefreshSavedLists(update.Id); Message("已用当前窗口摆放更新“" + update.Name + "”。");
+                RequireLayout(); await SaveNamed();
             });
             OnClick("RenameButton", async delegate
             {
@@ -233,9 +229,10 @@ namespace WindowHome
                 }
                 else if (lastTopology != snap.Topology) Transition("显示器配置变化", data.Options.RestoreDisplay);
                 else if (lastDesktop != snap.DesktopId)
-                { pendingAuto = false; born.Clear(); ResetKnown(snap); learning.Baseline(snap, now); Message("已切换桌面，窗口保持原位，使用独立的自动记忆。"); }
+                { pendingAuto = false; ResetKnown(snap); learning.Baseline(snap, now); Message("已切换桌面，窗口保持原位，使用独立的自动记忆。"); }
                 lastTopology = snap.Topology; lastDesktop = snap.DesktopId;
                 if (data.Options.Paused || now < transitionUntil) { ResetKnown(snap); return; }
+                if (!data.Options.CanRestore) pendingAuto = false;
                 if (pendingAuto)
                 {
                     pendingAuto = false;
@@ -244,18 +241,13 @@ namespace WindowHome
                     { await Restore(memory, false, transitionReason); return; }
                     Message("当前显示器与桌面组合尚无历史，将在窗口稳定后开始记录。");
                 }
-                var instances = new HashSet<string>(snap.Windows.Select(Instance));
-                foreach (var w in snap.Windows) if (!known.Contains(Instance(w)) && !born.ContainsKey(Instance(w))) born[Instance(w)] = now;
-                foreach (string k in born.Keys.Where(k => !instances.Contains(k)).ToList()) born.Remove(k);
-                var ready = snap.Windows.Where(w => born.ContainsKey(Instance(w)) && (now - born[Instance(w)]).TotalSeconds >= 1.5).ToList();
-                known = instances;
-                foreach (var w in ready) born.Remove(Instance(w));
-                if (data.Options.RestoreNew && ready.Count > 0)
+                var ready = newWindows.Observe(snap, now, data.Options.NewWindowDelaySeconds);
+                if (data.Options.CanRestore && data.Options.RestoreNew && ready.Count > 0)
                 {
-                    var preference = service.NewWindowTarget(snap, ready.Where(w => !w.Fullscreen).ToList());
+                    var preference = service.NewWindowTarget(snap, ready.Where(w => !w.Fullscreen && w.State != 2).ToList());
                     var skipped = ready.Where(w => data.Habits.Any(h => h.Context == snap.Context && h.Window.AppKey == w.AppKey) &&
                         (preference == null || !preference.Windows.Any(p => Matcher.SameInstance(p, w)))).Select(w => new RestoreItem
-                        { App = w.App, Title = w.Title, Status = w.Fullscreen ? "全屏已跳过" : "匹配不确定", Detail = w.Fullscreen ? "请退出全屏后手动恢复。" : "存在该应用的历史，但无法唯一对应新窗口。已保留当前位置，可手动保存新的布局。" }).ToList();
+                        { App = w.App, Title = w.Title, Status = w.Fullscreen ? "全屏已跳过" : w.State == 2 ? "最小化已跳过" : "匹配不确定", Detail = w.Fullscreen ? "请退出全屏后手动恢复。" : w.State == 2 ? "保留新窗口当前的最小化状态。" : "存在该应用的历史，但无法唯一对应新窗口。已保留当前位置，可手动保存新的布局。" }).ToList();
                     if (preference != null) { await Restore(preference, false, "新窗口", skipped); return; }
                     if (skipped.Count > 0)
                     {
@@ -263,16 +255,18 @@ namespace WindowHome
                         Persist(); RefreshSavedLists(null); Message("新窗口没有自动移动，具体原因已写入恢复记录。");
                     }
                 }
-                if (learning.Observe(snap, now)) { Persist(); RefreshStatus(); Message("自动记忆已更新 · " + now.ToLocalTime().ToString("HH:mm:ss") + "。命名布局保持不变。"); }
+                // Do not learn a startup window before its delayed restore has finished.
+                if (data.Options.CanRestore && data.Options.RestoreNew && newWindows.HasWaiting) return;
+                if (learning.Observe(snap, now)) { Persist(); RefreshSavedLists(null); Message("日常布局已更新 · " + now.ToLocalTime().ToString("HH:mm:ss")); }
             }
             catch (Exception ex) { Error(ex); }
             finally { tickBusy = false; }
         }
-        private void ResetKnown(LayoutSnapshot snapshot) { known = new HashSet<string>(snapshot.Windows.Select(Instance)); born.Clear(); }
+        private void ResetKnown(LayoutSnapshot snapshot) { newWindows.Reset(snapshot); }
         private void Transition(string reason, bool restoreEnabled)
         {
             transitionUntil = DateTime.UtcNow.AddSeconds(6); learning.Hold(transitionUntil.AddSeconds(2));
-            pendingAuto = restoreEnabled && !data.Options.Paused; transitionReason = reason; born.Clear();
+            pendingAuto = restoreEnabled && data.Options.CanRestore; transitionReason = reason;
             Message(reason + "，等待配置稳定后" + (pendingAuto ? "恢复最近现场。" : "继续记录。"));
         }
         private async Task RefreshCurrent() { current = await service.CaptureAsync(); RenderCurrent(); }
@@ -286,19 +280,52 @@ namespace WindowHome
         }
         private async Task Finished(RestoreReport report)
         {
-            Persist(); await RefreshCurrent(); ResetKnown(current); learning.Baseline(current, DateTime.UtcNow);
+            Persist(); await RefreshCurrent(); if (report.Trigger != "新窗口") ResetKnown(current); learning.Baseline(current, DateTime.UtcNow);
             RefreshSavedLists(null);
             Message(report.Items.Count > 0 && report.SuccessCount == report.Items.Count ? "就绪" : "有项目未恢复，详见恢复记录。");
         }
         private async Task SaveNamed()
         {
-            await RefreshCurrent(); bool makeDefault;
-            string name = NameDialog("记住当前布局", data.Layouts.Count == 0 ? "日常布局" : "布局 " + DateTime.Now.ToString("MM-dd HH:mm"), true, out makeDefault);
-            if (name == null) return;
-            var layout = service.SaveNamed(current, name); learning.Commit(current);
+            await RefreshCurrent();
+            var dialog = new Window { Owner = window, Title = "保存布局", Width = 480, Height = 460, ResizeMode = ResizeMode.NoResize,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner, FontFamily = window.FontFamily, FontSize = 13, Background = Brush("#F4F6FA") };
+            var panel = new StackPanel { Margin = new Thickness(24) }; dialog.Content = panel;
+            panel.Children.Add(new TextBlock { Text = "保存方式", Margin = new Thickness(0, 0, 0, 7) });
+            var mode = new ComboBox { Name = "SaveMode", Padding = new Thickness(9), Margin = new Thickness(0, 0, 0, 14) };
+            mode.Items.Add(new ComboBoxItem { Content = "合并到已有布局", IsEnabled = data.Layouts.Count > 0 });
+            mode.Items.Add(new ComboBoxItem { Content = "覆盖已有布局", IsEnabled = data.Layouts.Count > 0 });
+            mode.Items.Add(new ComboBoxItem { Content = "另存为新布局" }); panel.Children.Add(mode);
+            var label = new TextBlock { Text = "目标布局", Margin = new Thickness(0, 0, 0, 7) }; panel.Children.Add(label);
+            var targets = new ComboBox { Name = "SaveTarget", ItemsSource = data.Layouts, DisplayMemberPath = "DisplayName", Padding = new Thickness(9) }; panel.Children.Add(targets);
+            targets.SelectedItem = SelectedLayout() ?? data.Layouts.FirstOrDefault(l => l.Name == "日常布局" && l.Context == current.Context) ?? data.Layouts.FirstOrDefault();
+            var nameBox = new TextBox { Name = "SaveName", Text = data.Layouts.Count == 0 ? "日常布局" : "布局 " + DateTime.Now.ToString("MM-dd HH:mm"), MaxLength = 60 }; panel.Children.Add(nameBox);
+            var hint = new TextBlock { Foreground = Brush("#728096"), TextWrapping = TextWrapping.Wrap, MinHeight = 40, Margin = new Thickness(0, 9, 0, 0) }; panel.Children.Add(hint);
+            var check = new CheckBox { Content = "设为当前显示器组合的默认布局", IsChecked = !data.Defaults.Any(d => d.Context == current.Context), Margin = new Thickness(0, 8, 0, 0) }; panel.Children.Add(check);
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 18, 0, 0) }; panel.Children.Add(buttons);
+            buttons.Children.Add(new Button { Content = "取消", IsCancel = true, Padding = new Thickness(18, 7, 18, 7), Margin = new Thickness(0, 0, 10, 0) });
+            var save = new Button { Name = "SaveConfirm", Content = "保存", IsDefault = true, Padding = new Thickness(18, 7, 18, 7) }; buttons.Children.Add(save);
+            mode.SelectionChanged += delegate
+            {
+                bool create = mode.SelectedIndex == 2; label.Text = create ? "新布局名称" : "目标布局";
+                targets.Visibility = create ? Visibility.Collapsed : Visibility.Visible; nameBox.Visibility = create ? Visibility.Visible : Visibility.Collapsed;
+                hint.Text = mode.SelectedIndex == 0 ? "更新已打开的窗口，保留未打开软件的记录。" : mode.SelectedIndex == 1 ? "覆盖后只保留当前打开的窗口。" : "保存为一套独立布局。";
+            };
+            mode.SelectedIndex = data.Layouts.Count > 0 ? 0 : 2;
+            save.Click += delegate
+            {
+                if (mode.SelectedIndex == 2 && (String.IsNullOrWhiteSpace(nameBox.Text) || data.Layouts.Any(l => l.Context == current.Context && String.Equals(l.Name, nameBox.Text.Trim(), StringComparison.OrdinalIgnoreCase))))
+                { hint.Text = "名称不能为空或重复；同名布局请选择合并或覆盖。"; return; }
+                if (mode.SelectedIndex != 2 && targets.SelectedItem == null) return;
+                dialog.DialogResult = true;
+            };
+            if (dialog.ShowDialog() != true) return;
+            await RefreshCurrent();
+            var existing = mode.SelectedIndex == 2 ? null : (LayoutSnapshot)targets.SelectedItem;
+            var layout = service.SaveNamed(current, existing == null ? nameBox.Text.Trim() : existing.Name, existing, mode.SelectedIndex == 0);
+            bool makeDefault = check.IsChecked == true;
             if (makeDefault) service.SetDefault(layout, current.Context);
             learning.Baseline(current, DateTime.UtcNow); Persist(); RefreshSavedLists(layout.Id);
-            Message("已记住“" + name + "”的 " + layout.Windows.Count + " 个窗口" + (makeDefault ? "，并设为默认布局。" : "。"));
+            Message("已保存“" + layout.Name + "” · " + layout.Windows.Count + " 个窗口");
         }
         private LayoutSnapshot SelectedLayout() { return Find<ListBox>("LayoutList").SelectedItem as LayoutSnapshot; }
         private LayoutSnapshot RequireLayout() { var s = SelectedLayout(); if (s == null) throw new InvalidOperationException("先选择一套布局。"); return s; }
@@ -316,7 +343,7 @@ namespace WindowHome
         private void RefreshStatus()
         {
             bool busy = actionBusy || service.Busy;
-            Find<TextBlock>("StatusLabel").Text = busy ? "● 正在处理" : data.Options.Paused ? "● 自动管理已暂停" : "● 自动管理中";
+            Find<TextBlock>("StatusLabel").Text = busy ? "● 正在处理" : data.Options.Paused ? "● 自动管理已暂停" : "记忆 " + (data.Options.Learning ? "开" : "关") + " · 恢复 " + (data.Options.AutoRestore ? "开" : "关");
             Find<TextBlock>("StatusLabel").Foreground = Brush(data.Options.Paused ? "#B27A2A" : "#087F73");
             Find<Button>("PauseButton").Content = data.Options.Paused ? "继续" : "暂停";
             var target = current == null ? null : service.Target(current);
@@ -428,6 +455,10 @@ namespace WindowHome
         private void LoadSettings()
         {
             Find<CheckBox>("LearningCheck").IsChecked = data.Options.Learning;
+            Find<CheckBox>("AutoRestoreCheck").IsChecked = data.Options.AutoRestore;
+            Find<TextBox>("LearningIntervalBox").Text = data.Options.LearningIntervalSeconds.ToString();
+            Find<TextBox>("StableSecondsBox").Text = data.Options.StableSeconds.ToString();
+            Find<TextBox>("NewWindowDelayBox").Text = data.Options.NewWindowDelaySeconds.ToString();
             Find<CheckBox>("DisplayCheck").IsChecked = data.Options.RestoreDisplay;
             Find<CheckBox>("WakeCheck").IsChecked = data.Options.RestoreWake;
             Find<CheckBox>("NewCheck").IsChecked = data.Options.RestoreNew;
@@ -438,6 +469,13 @@ namespace WindowHome
         }
         private void ApplySettings()
         {
+            int interval, stable, delay;
+            if (!Int32.TryParse(Find<TextBox>("LearningIntervalBox").Text.Trim(), out interval) || interval < 5 || interval > 3600)
+                throw new InvalidOperationException("记忆间隔需为 5–3600 秒的整数。");
+            if (!Int32.TryParse(Find<TextBox>("StableSecondsBox").Text.Trim(), out stable) || stable < 1 || stable > 120)
+                throw new InvalidOperationException("稳定等待需为 1–120 秒的整数。");
+            if (!Int32.TryParse(Find<TextBox>("NewWindowDelayBox").Text.Trim(), out delay) || delay < 1 || delay > 30)
+                throw new InvalidOperationException("新窗口稳定等待需为 1–30 秒的整数。");
             uint restoreMods, restoreKey, saveMods, saveKey;
             string restore = Find<TextBox>("RestoreKeyBox").Text.Trim(), save = Find<TextBox>("SaveKeyBox").Text.Trim();
             if (!Hotkey.Parse(restore, out restoreMods, out restoreKey) || !Hotkey.Parse(save, out saveMods, out saveKey)) throw new InvalidOperationException("快捷键格式不正确，例如 Ctrl+Alt+R；需包含 Ctrl 或 Alt。");
@@ -456,12 +494,15 @@ namespace WindowHome
                 }
             }
             data.Options.Learning = Find<CheckBox>("LearningCheck").IsChecked == true;
+            data.Options.AutoRestore = Find<CheckBox>("AutoRestoreCheck").IsChecked == true;
+            data.Options.LearningIntervalSeconds = interval; data.Options.StableSeconds = stable; data.Options.NewWindowDelaySeconds = delay;
             data.Options.RestoreDisplay = Find<CheckBox>("DisplayCheck").IsChecked == true;
             data.Options.RestoreWake = Find<CheckBox>("WakeCheck").IsChecked == true;
             data.Options.RestoreNew = Find<CheckBox>("NewCheck").IsChecked == true;
             data.Options.RestoreHotkey = restore; data.Options.SaveHotkey = save;
             data.Options.Excluded = Find<TextBox>("ExcludedBox").Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim()).Where(s => s.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            if (current != null) learning.Baseline(current, DateTime.UtcNow);
+            if (current != null) { learning.Baseline(current, DateTime.UtcNow); ResetKnown(current); }
+            pendingAuto = false;
             Persist(); string result = RegisterKeys(); Message("设置已保存。" + result);
         }
         private string RegisterKeys()

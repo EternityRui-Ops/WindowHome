@@ -1,10 +1,10 @@
-﻿param([switch]$Test, [switch]$BuildTests, [switch]$RenderUi)
+param([switch]$Test, [switch]$BuildTests, [switch]$RenderUi, [string]$OutputDirectory = 'bin')
 $ErrorActionPreference = 'Stop'
 $projectDir = $PSScriptRoot
 $frameworkDir = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $compilerPath = Join-Path $frameworkDir 'csc.exe'
 if (-not (Test-Path -LiteralPath $compilerPath)) { throw '需要 Windows x64 和 .NET Framework 4.8。' }
-$releaseDir = Join-Path $projectDir 'bin'
+$releaseDir = Join-Path $projectDir $OutputDirectory
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 $iconPath = Join-Path $projectDir 'assets\WindowHome.ico'
 if (-not (Test-Path -LiteralPath $iconPath)) {
@@ -53,3 +53,4 @@ if ($RenderUi) {
     & $renderPath
     if ($LASTEXITCODE -ne 0) { throw '界面布局检查未通过。' }
 }
+

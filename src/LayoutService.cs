@@ -11,20 +11,21 @@ namespace WindowHome
     {
         private readonly AppData data;
         private string observed = "", committed = "";
-        private DateTime changedAt, holdUntil;
+        private DateTime changedAt, holdUntil, committedAt;
         public LearningService(AppData data) { this.data = data; }
         public void Hold(DateTime until) { holdUntil = until; observed = ""; }
         public void Baseline(LayoutSnapshot current, DateTime now)
         {
-            observed = Geometry.Signature(current); committed = observed; changedAt = now;
+            observed = Geometry.Signature(current); committed = observed; changedAt = now; committedAt = now;
         }
         public bool Observe(LayoutSnapshot current, DateTime now)
         {
-            if (data.Options.Paused || !data.Options.Learning || now < holdUntil || String.IsNullOrEmpty(current.DesktopId)) return false;
+            if (!data.Options.CanLearn || now < holdUntil || String.IsNullOrEmpty(current.DesktopId)) return false;
             string signature = Geometry.Signature(current);
             if (signature != observed) { observed = signature; changedAt = now; return false; }
-            if ((now - changedAt).TotalSeconds < 5 || signature == committed) return false;
-            Commit(current); committed = signature; return true;
+            if ((now - changedAt).TotalSeconds < Math.Max(1, data.Options.StableSeconds) || signature == committed ||
+                (now - committedAt).TotalSeconds < Math.Max(5, data.Options.LearningIntervalSeconds)) return false;
+            Commit(current); committed = signature; committedAt = now; return true;
         }
         public void Commit(LayoutSnapshot current)
         {
@@ -43,6 +44,20 @@ namespace WindowHome
                 data.Habits.Add(new HabitRecord { Context = current.Context, Window = window.Copy() });
             // Keep bounded, most recently learned history; named layouts are never pruned.
             if (data.Habits.Count > 1000) data.Habits = data.Habits.OrderByDescending(h => h.Window.Updated).Take(1000).ToList();
+            if (snapshot.Windows.Count > 0)
+            {
+                var daily = data.Layouts.FirstOrDefault(l => l.Context == snapshot.Context && l.Name == "日常布局");
+                if (daily == null)
+                {
+                    daily = snapshot.Copy(); daily.Id = Guid.NewGuid().ToString("N"); daily.Name = "日常布局"; data.Layouts.Add(daily);
+                }
+                else
+                {
+                    var updated = LayoutEditing.Merge(daily, snapshot); daily.Displays = updated.Displays;
+                    daily.Windows = updated.Windows; daily.Updated = snapshot.Updated;
+                }
+                if (!data.Defaults.Any(d => d.Context == snapshot.Context)) data.Defaults.Add(new DefaultLayout { Context = snapshot.Context, LayoutId = daily.Id });
+            }
         }
     }
     public sealed class LayoutService
@@ -58,12 +73,23 @@ namespace WindowHome
             return (pick == null ? null : data.Layouts.FirstOrDefault(l => l.Id == pick.LayoutId)) ?? data.Memories.FirstOrDefault(l => l.Context == current.Context);
         }
         public LayoutSnapshot SaveNamed(LayoutSnapshot current, string name)
+        { return SaveNamed(current, name, null, false); }
+        public LayoutSnapshot SaveNamed(LayoutSnapshot current, string name, LayoutSnapshot existing, bool merge)
         {
             if (String.IsNullOrWhiteSpace(name)) throw new ArgumentException("请输入布局名称。");
             var layout = current.Copy(); layout.Id = Guid.NewGuid().ToString("N"); layout.Name = name.Trim(); layout.Updated = DateTime.UtcNow;
             layout.Windows = layout.Windows.Where(w => !w.Fullscreen && !String.IsNullOrEmpty(w.DesktopId)).ToList();
             if (layout.Windows.Count == 0) throw new InvalidOperationException("当前没有可记录的普通窗口。请先打开软件并退出全屏。");
-            data.Layouts.Add(layout); return layout;
+            if (existing == null)
+            {
+                if (data.Layouts.Any(l => String.Equals(l.Name, layout.Name, StringComparison.OrdinalIgnoreCase) && l.Context == layout.Context))
+                    throw new InvalidOperationException("已有同名布局，请选择合并或覆盖。");
+                data.Layouts.Add(layout); return layout;
+            }
+            if (merge) layout = LayoutEditing.Merge(existing, layout);
+            existing.Topology = layout.Topology; existing.DesktopId = layout.DesktopId; existing.Displays = layout.Displays;
+            existing.Windows = layout.Windows; existing.Updated = DateTime.UtcNow;
+            return existing;
         }
         public void SetDefault(LayoutSnapshot layout, string context)
         {
@@ -101,6 +127,12 @@ namespace WindowHome
                     var item = new RestoreItem { App = match.Saved.App, Title = match.Saved.Title };
                     report.Items.Add(item);
                     if (match.Live == null) { item.Status = match.Reason.Contains("多个") ? "匹配不确定" : "窗口未打开"; item.Detail = match.Reason; continue; }
+                    if (trigger == "新窗口")
+                    {
+                        if (!Matcher.SameInstance(match.Saved, match.Live) || match.Live.State == 2 || match.Live.Fullscreen)
+                        { item.Status = "已跳过"; item.Detail = "新窗口已关闭、最小化或改变状态，保留当前操作。"; continue; }
+                        match.Saved = match.Saved.Copy(); match.Saved.State = match.Live.State; match.Saved.RestoreToMax = match.Live.RestoreToMax;
+                    }
                     var mapped = Geometry.Map(match.Saved, live.Displays);
                     item.Target = mapped;
                     pending.Add(new Pending { Saved = match.Saved, Live = match.Live, Rect = mapped,
@@ -114,6 +146,8 @@ namespace WindowHome
                         foreach (var p in pending.Where(p => !p.Done))
                         {
                             if (clock.ElapsedMilliseconds >= 5000) break;
+                            if (system.Verify(p.Live, p.Saved, p.Rect, p.Display))
+                            { p.Done = true; p.Item.Success = true; p.Item.Status = "已核验"; p.Item.Detail = "窗口已在目标位置，保持原位。"; continue; }
                             string error = system.Apply(p.Live, p.Saved, p.Rect, p.Display);
                             if (error.Length != 0) { p.Done = true; p.Item.Status = "未恢复"; p.Item.Detail = error; }
                         }
@@ -168,11 +202,16 @@ namespace WindowHome
         public LayoutSnapshot NewWindowTarget(LayoutSnapshot current, IList<WindowRecord> newlyOpened)
         {
             var habits = data.Habits.Where(h => h.Context == current.Context).Select(h => h.Window).ToList();
-            var matches = Matcher.Match(habits, newlyOpened, false).Where(m => m.Live != null).ToList();
+            var matches = Matcher.Match(habits, newlyOpened, false).Where(m => m.Live != null && m.Live.State != 2 && !m.Live.Fullscreen).ToList();
             if (matches.Count == 0) return null;
             var s = current.Copy(); s.Name = "新窗口的最近位置"; s.Windows = matches.Select(m => m.Saved.Copy()).ToList();
             // Bind each selected preference to this exact new instance before restoring.
-            for (int i = 0; i < matches.Count; i++) { s.Windows[i].Handle = matches[i].Live.Handle; s.Windows[i].Pid = matches[i].Live.Pid; s.Windows[i].ProcessStarted = matches[i].Live.ProcessStarted; }
+            for (int i = 0; i < matches.Count; i++)
+            {
+                var target = s.Windows[i]; var live = matches[i].Live;
+                target.Handle = live.Handle; target.Pid = live.Pid; target.ProcessStarted = live.ProcessStarted;
+                target.State = live.State; target.RestoreToMax = live.RestoreToMax;
+            }
             return s;
         }
     }

@@ -29,7 +29,7 @@ namespace WindowHome.Tests
         [STAThread] public static int Main(string[] args)
         {
             WindowsSystem.EnableDpi(); root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-data", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")); Directory.CreateDirectory(root);
-            try { UnitTests().GetAwaiter().GetResult(); RevisionTests(); if (!args.Contains("--unit-only")) NativeTests().GetAwaiter().GetResult(); else results.Add("SKIP 原生窗口测试（--unit-only）"); }
+            try { UnitTests().GetAwaiter().GetResult(); RevisionTests(); ExperienceTests().GetAwaiter().GetResult(); if (!args.Contains("--unit-only")) NativeTests().GetAwaiter().GetResult(); else results.Add("SKIP 原生窗口测试（--unit-only）"); }
             catch (Exception ex) { Check("测试运行器异常", false, ex.ToString()); }
             string report = "WindowHome verification\r\nUTC " + DateTime.UtcNow.ToString("s") + "\r\n" + String.Join("\r\n", results) + "\r\n\r\nPassed: " + passed + "; Failed: " + failed + "\r\n";
             File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-results.txt"), report, System.Text.Encoding.UTF8);
@@ -64,7 +64,7 @@ namespace WindowHome.Tests
             var otherDesktop = newA.Copy(); otherDesktop.DesktopId = "desk-b";
             Check("自动匹配隔离虚拟桌面", Matcher.Match(new[] { a }, new[] { otherDesktop }, false)[0].Live == null);
             Check("显式手动适配当前桌面", Matcher.Match(new[] { a }, new[] { otherDesktop }, true)[0].Live != null);
-            var data = new AppData(); var learn = new LearningService(data); var snapshot = Snap(a); var now = DateTime.UtcNow;
+            var data = new AppData(); data.Options.LearningIntervalSeconds = 5; var learn = new LearningService(data); var snapshot = Snap(a); var now = DateTime.UtcNow;
             learn.Observe(snapshot, now); learn.Observe(snapshot, now.AddSeconds(4)); Check("未满 5 秒不学习", data.Memories.Count == 0);
             Check("稳定 5 秒建立记忆", learn.Observe(snapshot, now.AddSeconds(5)) && data.Memories.Count == 1);
             var fake = new FakeSystem(snapshot); var service = new LayoutService(data, fake); var named = service.SaveNamed(snapshot, "日常"); service.SetDefault(named, snapshot.Context);
@@ -76,9 +76,10 @@ namespace WindowHome.Tests
             data.Options.Paused = false; learn.Baseline(temporary, now.AddSeconds(31)); learn.Observe(temporary, now.AddSeconds(40)); Check("继续后临时位置不直接覆盖", data.Memories[0].Windows[0].Rect.X == 250);
             learn.Hold(now.AddSeconds(100)); learn.Observe(snapshot, now.AddSeconds(50)); learn.Observe(snapshot, now.AddSeconds(80)); Check("显示切换保护历史", data.Memories[0].Windows[0].Rect.X == 250);
             var deskB = Snap(a.Copy()); deskB.DesktopId = "desk-b"; deskB.Windows[0].DesktopId = "desk-b"; learn.Commit(deskB); Check("同屏不同桌面的历史独立", data.Memories.Count == 2);
+            int layoutCount = data.Layouts.Count;
             var store = new DataStore(Path.Combine(root, "persistence")); store.Save(data); data.Options.Paused = true; store.Save(data);
-            var loaded = new DataStore(store.DirectoryPath).Load(); Check("布局与设置跨重启读取", loaded.Layouts.Count == 1 && loaded.Options.Paused && loaded.Habits.Count > 0);
-            File.WriteAllText(store.FilePath, "broken XML"); var recoveredStore = new DataStore(store.DirectoryPath); var recovered = recoveredStore.Load(); Check("主文件损坏时读取备份", recovered.Layouts.Count == 1 && recoveredStore.Warning.StartsWith("主数据")); recoveredStore.Save(recovered); Check("修复写入保留可读数据", new DataStore(store.DirectoryPath).Load().Layouts.Count == 1);
+            var loaded = new DataStore(store.DirectoryPath).Load(); Check("布局与设置跨重启读取", loaded.Layouts.Count == layoutCount && loaded.Options.Paused && loaded.Habits.Count > 0);
+            File.WriteAllText(store.FilePath, "broken XML"); var recoveredStore = new DataStore(store.DirectoryPath); var recovered = recoveredStore.Load(); Check("主文件损坏时读取备份", recovered.Layouts.Count == layoutCount && recoveredStore.Warning.StartsWith("主数据")); recoveredStore.Save(recovered); Check("修复写入保留可读数据", new DataStore(store.DirectoryPath).Load().Layouts.Count == layoutCount);
             var futureStore = new DataStore(Path.Combine(root, "future-version")); var futureData = new AppData { Version = 2 }; futureStore.Save(futureData);
             var futureReader = new DataStore(futureStore.DirectoryPath); futureReader.Load(); bool refused = false;
             try { futureReader.Save(new AppData()); } catch (InvalidOperationException) { refused = true; }
@@ -135,6 +136,66 @@ namespace WindowHome.Tests
             Check("自选启动不修改原方案", layout.Windows.Count == 5 && subset.Windows[0] != layout.Windows[0]);
             Check("未勾选软件不会默认启动全部", LaunchSelection.Subset(layout, new string[0]).Windows.Count == 0);
         }
+        private static async Task ExperienceTests()
+        {
+            using (var stream = typeof(LayoutService).Assembly.GetManifestResourceStream("WindowHome.Main.xaml"))
+            {
+                var view = (System.Windows.Window)System.Windows.Markup.XamlReader.Load(stream);
+                Check("新版设置界面可加载且包含独立控件", new[] { "LearningCheck", "AutoRestoreCheck", "LearningIntervalBox", "StableSecondsBox", "NewWindowDelayBox" }.All(n => view.FindName(n) != null));
+                view.Close();
+            }
+            var a = W(1, "A"); var b = W(2, "B"); b.Path = "C:\\b.exe"; b.App = "b";
+            var c = W(3, "C"); c.Path = "C:\\c.exe"; c.App = "c";
+            var saved = Snap(a, b); var live = Snap(a.Copy(), c); live.Windows[0].Rect.X = 420;
+            var data = new AppData(); var fake = new FakeSystem(live); var service = new LayoutService(data, fake);
+            var layout = service.SaveNamed(saved, "工作"); string id = layout.Id; service.SetDefault(layout, saved.Context);
+            var merged = service.SaveNamed(live, "工作", layout, true);
+            Check("合并更新已打开窗口并保留未打开软件", merged.Windows.Count == 3 && merged.Windows.First(w => w.App == "test").Rect.X == 420 && merged.Windows.Any(w => w.App == "b"));
+            Check("合并保留布局身份和默认关联", data.Layouts.Count == 1 && merged.Id == id && service.Target(live).Id == id);
+            service.SaveNamed(Snap(c), "工作", layout, false);
+            Check("覆盖仅保留当前窗口且不生成副本", data.Layouts.Count == 1 && layout.Windows.Count == 1 && layout.Windows[0].App == "c" && layout.Id == id);
+            bool duplicate = false; try { service.SaveNamed(Snap(c), "工作"); } catch (InvalidOperationException) { duplicate = true; }
+            Check("重复名称需显式选择合并或覆盖", duplicate && data.Layouts.Count == 1);
+            var same1 = W(10, "same"); var same2 = W(20, "same"); same1.AppWindowCount = same2.AppWindowCount = 2;
+            var repeated = LayoutEditing.Merge(Snap(same1, same2), Snap(W(30, "same"), W(40, "same")));
+            Check("重复合并歧义同名窗口不会无限增多", LayoutEditing.Merge(repeated, Snap(W(50, "same"), W(60, "same"))).Windows.Count == 2);
+            var automatic = new AppData(); automatic.Options.LearningIntervalSeconds = 60; automatic.Options.StableSeconds = 1;
+            var learning = new LearningService(automatic); var now = DateTime.UtcNow;
+            learning.Observe(saved, now); Check("自定义稳定等待生效", learning.Observe(saved, now.AddSeconds(1)));
+            var daily = automatic.Layouts.Single(); string dailyId = daily.Id;
+            var changed = Snap(a.Copy()); changed.Windows[0].Rect.X = 555;
+            learning.Observe(changed, now.AddSeconds(2));
+            Check("记忆间隔内不重复覆盖", !learning.Observe(changed, now.AddSeconds(5)) && daily.Windows[0].Rect.X == 100);
+            Check("达到自定义间隔更新日常布局", learning.Observe(changed, now.AddSeconds(61)) && automatic.Layouts.Count == 1 && daily.Id == dailyId && daily.Windows[0].Rect.X == 555);
+            Check("日常布局保留未打开软件供一次启动", daily.Windows.Count == 2 && daily.Windows.Any(w => w.App == "b"));
+            automatic.Options.AutoRestore = false;
+            Check("仅记忆模式独立于自动恢复", automatic.Options.CanLearn && !automatic.Options.CanRestore);
+            automatic.Options.Learning = false; automatic.Options.AutoRestore = true;
+            Check("仅恢复模式独立于自动记忆", !automatic.Options.CanLearn && automatic.Options.CanRestore);
+            automatic.Options.Paused = true;
+            Check("暂停仍同时冻结两个自动功能", !automatic.Options.CanLearn && !automatic.Options.CanRestore);
+            var history = new AppData(); var historyLearn = new LearningService(history); var minimized = Snap(a.Copy()); minimized.Windows[0].State = 2; minimized.Windows[0].RestoreToMax = true; historyLearn.Commit(minimized);
+            var newService = new LayoutService(history, new FakeSystem(live));
+            var preference = newService.NewWindowTarget(live, new[] { a.Copy() });
+            Check("历史最小化不收起刚打开的窗口", preference != null && preference.Windows[0].State == 1 && !preference.Windows[0].RestoreToMax);
+            var maximized = a.Copy(); maximized.State = 3;
+            Check("新窗口保留当前最大化状态", newService.NewWindowTarget(Snap(maximized), new[] { maximized }).Windows[0].State == 3);
+            var hidden = a.Copy(); hidden.State = 2;
+            Check("已最小化的新窗口不被自动展开", newService.NewWindowTarget(Snap(hidden), new[] { hidden }) == null);
+            Check("生成新窗口目标不改写历史状态", history.Habits[0].Window.State == 2 && history.Habits[0].Window.RestoreToMax);
+            var tracker = new NewWindowTracker(); tracker.Reset(Snap());
+            tracker.Observe(Snap(a.Copy()), now, 3); var starting = a.Copy(); starting.Rect.X = 300;
+            Check("新窗口初始摆放变化延长等待", tracker.Observe(Snap(starting), now.AddSeconds(2), 3).Count == 0 && tracker.Observe(Snap(starting), now.AddSeconds(4), 3).Count == 0);
+            Check("新窗口稳定后只恢复一次", tracker.Observe(Snap(starting), now.AddSeconds(5), 3).Count == 1 && tracker.Observe(Snap(starting), now.AddSeconds(8), 3).Count == 0 && !tracker.HasWaiting);
+            var stableFake = new FakeSystem(saved); var stableService = new LayoutService(new AppData(), stableFake);
+            var report = await stableService.RestoreAsync(saved, false, false, "测试");
+            Check("目标位置已正确时不重复移动", report.SuccessCount == 2 && stableFake.ApplyCount == 0);
+            var storage = new DataStore(Path.Combine(root, "experience-options")); automatic.Options.Paused = false; storage.Save(automatic);
+            var loaded = storage.Load(); Check("独立开关和自定义间隔可持久化", !loaded.Options.Learning && loaded.Options.AutoRestore && loaded.Options.LearningIntervalSeconds == 60 && loaded.Options.StableSeconds == 1);
+            string oldXml = File.ReadAllText(storage.FilePath).Replace("<AutoRestore>true</AutoRestore>", "").Replace("<LearningIntervalSeconds>60</LearningIntervalSeconds>", "").Replace("<StableSeconds>1</StableSeconds>", "").Replace("<NewWindowDelaySeconds>2</NewWindowDelaySeconds>", "");
+            File.WriteAllText(storage.FilePath, oldXml); loaded = storage.Load();
+            Check("旧配置补充默认开关和时间设置", loaded.Options.AutoRestore && loaded.Options.LearningIntervalSeconds == 30 && loaded.Options.StableSeconds == 5 && loaded.Options.NewWindowDelaySeconds == 2);
+        }
         private sealed class FakeSystem : IWindowSystem
         {
             public LayoutSnapshot Current; public string Error = ""; public bool IgnoreApply;
@@ -142,7 +203,8 @@ namespace WindowHome.Tests
             public LayoutSnapshot Capture(AppOptions o) { return Current.Copy(); }
             public bool IsCurrent(WindowRecord w) { return true; }
             public string Apply(WindowRecord live, WindowRecord saved, PixelRect rect, DisplayRecord display)
-            { if (Error.Length != 0) return Error; if (!IgnoreApply) { var w = Current.Windows.First(x => x.Handle == live.Handle); w.Rect = rect.Copy(); w.State = saved.State; } return ""; }
+            { ApplyCount++; if (Error.Length != 0) return Error; if (!IgnoreApply) { var w = Current.Windows.First(x => x.Handle == live.Handle); w.Rect = rect.Copy(); w.State = saved.State; } return ""; }
+            public int ApplyCount;
             public bool Verify(WindowRecord live, WindowRecord saved, PixelRect rect, DisplayRecord display)
             { var w = Current.Windows.First(x => x.Handle == live.Handle); return w.Rect.Near(rect, 4) && w.State == saved.State; }
             public void Order(IList<WindowRecord> windows) { for (int i = 0; i < windows.Count; i++) Current.Windows.First(w => w.Handle == windows[i].Handle).Z = i; }
@@ -193,7 +255,21 @@ namespace WindowHome.Tests
                 result = await service.RestoreAsync(minimizedMax, false, true, "native"); Check("保留最小化前的最大化标记", result.SuccessCount == 1, String.Join("; ", result.Items.Select(x => x.Detail)));
                 Native.ShowWindowAsync(new IntPtr(minimizedMax.Windows[0].Handle), 9); await Task.Delay(200);
                 Check("从最小化展开回到最大化", system.Capture(data.Options).Windows.First(w => w.Pid == alpha.Process.Id).State == 3);
-                alpha.Command("normal"); beta.Command("normal"); alpha.Command("title|窗归受控测试 · 新标题");
+                alpha.Command("normal"); beta.Command("normal");
+                var newWindowData = new AppData(); var visible = system.Capture(newWindowData.Options);
+                var rememberedMin = visible.Copy(); rememberedMin.Windows.First(w => w.Pid == alpha.Process.Id).State = 2;
+                new LearningService(newWindowData).Commit(rememberedMin);
+                var autoService = new LayoutService(newWindowData, system); alpha.Command("move|750|250|520|330");
+                visible = system.Capture(newWindowData.Options);
+                var newTarget = autoService.NewWindowTarget(visible, visible.Windows.Where(w => w.Pid == alpha.Process.Id).ToList());
+                foreground = Native.GetForegroundWindow(); result = await autoService.RestoreAsync(newTarget, false, true, "新窗口");
+                Check("真实新窗口恢复位置而不套用最小化历史", result.SuccessCount == 1 && system.Capture(newWindowData.Options).Windows.First(w => w.Pid == alpha.Process.Id).State == 1);
+                Check("真实新窗口恢复不夺取前台", Native.GetForegroundWindow() == foreground);
+                alpha.Command("max"); visible = system.Capture(newWindowData.Options);
+                newTarget = autoService.NewWindowTarget(visible, visible.Windows.Where(w => w.Pid == alpha.Process.Id).ToList());
+                result = await autoService.RestoreAsync(newTarget, false, true, "新窗口");
+                Check("真实新窗口自动定位保留最大化", result.SuccessCount == 1 && system.Capture(newWindowData.Options).Windows.First(w => w.Pid == alpha.Process.Id).State == 3);
+                alpha.Command("normal"); alpha.Command("title|窗归受控测试 · 新标题");
                 result = await service.RestoreAsync(saved, false, true, "native"); Check("真实标题改变后仍识别同一窗口", result.SuccessCount == 2);
                 var betaSaved = saved.Copy(); betaSaved.Windows = saved.Windows.Where(w => w.Pid == beta.Process.Id).ToList(); beta.Command("close"); beta.Process.WaitForExit(3000);
                 using (var replacement = new Child("Beta"))

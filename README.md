@@ -1,14 +1,14 @@
-# 窗归 · WindowHome 1.1
+# 窗归 · WindowHome 1.2
 
-窗归（WindowHome）是一款轻量的 Windows 窗口布局工具，能够自动记忆软件窗口的位置、大小和状态，支持一键恢复、撤销恢复和命名布局。界面简洁，恢复成功后静默记录；还可从保存的方案中勾选需要启动的软件，适合日常办公和多屏使用。支持 Windows 10/11 x64，免安装，数据保存在本机。
+记住 Windows 软件窗口的位置、大小和状态，一键回到顺手的布局。原生桌面程序，数据保存在本机，无需账户和联网服务。
 
-[下载最新版本](https://github.com/EternityRui-Ops/WindowHome/releases/latest) | [v1.1.0 下载页](https://github.com/EternityRui-Ops/WindowHome/releases/tag/v1.1.0)
+[下载最新版本](https://github.com/EternityRui-Ops/WindowHome/releases/latest) | [v1.2.0 下载页](https://github.com/EternityRui-Ops/WindowHome/releases/tag/v1.2.0)
 
 ## 开始使用
 
 1. 将运行包完整解压到一个固定目录，保留 `WindowHome.exe` 和 `WindowHome.exe.config` 在同一目录。
 2. 双击 `WindowHome.exe`。支持 Windows 10/11 x64，需要 .NET Framework 4.8 或更高的 4.x 版本。
-3. 打开日常使用的软件，摆好窗口，点击 **记住当前布局**，输入名称。勾选 **设为当前显示器组合的默认布局**，之后主按钮就会明确指向它。
+3. 打开日常使用的软件，摆好窗口，点击 **记住当前布局**。可选择“合并到已有布局”“覆盖已有布局”或“另存为新布局”；默认合并到选中的布局或“日常布局”。合并保留未打开软件的记录，覆盖仅保留当前打开的窗口。
 4. 窗口乱了，点击 **一键恢复**。操作后可查看 **恢复记录**，或点击 **撤销恢复**回到操作前。
 
 关闭主窗口会收起到系统托盘。单击托盘图标打开界面；右键可以恢复、保存、暂停和退出。开机启动需要在偏好设置中主动开启，默认关闭。
@@ -17,11 +17,11 @@
 
 | 操作 | 行为 |
 | --- | --- |
-| 自动记忆 | 每 2 秒观察一次，窗口摆放稳定至少 5 秒后更新，通常约 5–7 秒；保存当前现场并保留已关闭软件最近的稳定位置。 |
-| 命名布局 | 保存后保持固定，只有点击“用当前摆放更新”才改变。 |
+| 自动记忆 | 每 2 秒观察一次，默认稳定等待 5 秒，更新间隔至少 30 秒；两项均可调整。更新“日常布局”中已打开窗口的摆放，保留未打开的软件，不会按时间不断新增命名布局。 |
+| 命名布局 | 除自动更新的“日常布局”外保持固定；选择“保存 / 合并”可合并或覆盖，布局 ID 和默认关联保持不变。 |
 | 一键恢复 | 优先使用当前显示器和虚拟桌面组合指定的默认布局；没有默认布局时使用该组合的自动记忆。按钮旁显示目标名称。 |
 | 自动恢复 | 唤醒、解锁、远程会话重连或屏幕配置改变后，等待配置稳定，再恢复该组合最近的现场。新配置没有历史时开始学习。 |
-| 新窗口 | 在有对应历史且能够可靠匹配时，使用该窗口最近的稳定位置。同一软件多个窗口无法区分时，保留当前位置并记录原因。 |
+| 新窗口 | 默认等待新窗口的位置和大小稳定 2 秒后，只恢复其最近的位置和大小，保留当前正常 / 最大化状态，不套用历史最小化状态；当前已最小化或全屏的窗口跳过。同一软件多个窗口无法区分时保留原位。 |
 | 暂停 | 同时冻结学习和自动恢复。手动保存、恢复仍然有效；继续后不会立即移动现有窗口，也不会直接学走暂停期间的摆放。 |
 | 撤销 | 撤销最近一次有效恢复，尽量还原位置、尺寸、状态和遮挡顺序。不会关闭刚启动的软件；失败项目保留供重试。 |
 
@@ -33,7 +33,9 @@
 
 ## 偏好设置
 
-- 自动学习、唤醒恢复、显示器恢复和新窗口恢复可分别开关。
+- 自动记忆与自动恢复各有独立开关，支持“只记忆”“只恢复”或全部关闭；主界面分别显示两项状态。暂停仍同时冻结两项自动功能，手动保存、恢复继续可用。
+- 自动记忆间隔可设为 5–3600 秒（默认 30 秒），摆放稳定等待可设为 1–120 秒（默认 5 秒），新窗口稳定等待可设为 1–30 秒（默认 2 秒）。时间按每 2 秒一次的观察采样生效；窗口启动期间持续改变尺寸时会重新计时。
+- 唤醒恢复、显示器恢复和新窗口恢复可分别开关，受自动恢复总开关控制。关闭自动恢复不会关闭自动记忆；保存设置后不会立即移动现有窗口。
 - 默认快捷键：`Ctrl+Alt+R` 一键恢复，`Ctrl+Alt+S` 打开保存布局对话框。支持 Ctrl/Alt/Shift 与字母、数字或 F1–F12 组合，需包含 Ctrl 或 Alt；留空关闭。占用冲突会提示，界面按钮始终可用。
 - 应用排除每行一个，例如 `game.exe`、`notepad`，也可填写 EXE 完整路径。在“布局”的当前桌面中选择窗口后点击“排除选中应用”会立即生效。
 - 开机启动仅写入当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\WindowHome`，使用托盘后台模式。将程序移动到其他位置后，需要重新保存此设置。
@@ -50,7 +52,7 @@
 
 ## 数据与便携模式
 
-默认目录是 `%LOCALAPPDATA%\WindowHome`。`state.xml` 包含布局、自动记忆、应用位置、设置、一级撤销和最近 100 次恢复报告；`state.xml.bak` 为上一次写入的备份。正常保存和备份恢复后的保存使用原子替换。读取失败会尝试备份；两个文件都无法读取或版本不兼容时保留文件并进入只读模式，界面说明保存失败。1.1 兼容 1.0 的数据，原布局与设置可继续使用。
+默认目录是 `%LOCALAPPDATA%\WindowHome`。`state.xml` 包含布局、自动记忆、应用位置、设置、一级撤销和最近 100 次恢复报告；`state.xml.bak` 为上一次写入的备份。正常保存和备份恢复后的保存使用原子替换。读取失败会尝试备份；两个文件都无法读取或版本不兼容时保留文件并进入只读模式，界面说明保存失败。1.2 兼容 1.0 / 1.1 的数据，原布局与设置可继续使用；旧配置缺失的新选项使用默认值。
 
 记录包含窗口标题、程序路径、桌面/显示器标识和几何信息；不读取文档正文，不采集窗口截图，不上传数据。按最近更新时间最多保留 1000 条窗口习惯，命名布局不自动删除。
 
@@ -75,6 +77,7 @@ WindowHome.exe --data-dir "C:\path\to\test-data"
 ```powershell
 .\build.ps1                 # 编译到 bin\，使用系统 .NET Framework C# 编译器
 .\build.ps1 -BuildTests     # 编译程序、测试运行器和受控测试窗口
+.\build.ps1 -OutputDirectory bin-v1.2.0  # 旧版正在运行时构建到另一目录
 .\build.ps1 -Test           # 编译并执行全部测试，需要当前用户的交互式 Windows 桌面
 .\bin\WindowHome.Tests.exe --unit-only  # 无交互桌面时仅运行逻辑测试
 .\build.ps1 -RenderUi       # 100% / 150% / 200% 与最小窗口的离屏布局检查
@@ -87,3 +90,5 @@ WindowHome.exe --data-dir "C:\path\to\test-data"
 代码按 `IWindowSystem` 平台适配层、`LayoutService` 恢复与匹配、`LearningService` 学习、`DataStore` 存储和 WPF 界面分离。显示器和桌面变化会暂停学习，防止系统迁移窗口期间的临时位置污染原有配置。
 
 功能参考：[PersistentWindows 官方帮助](https://github.com/kangyu-california/PersistentWindows/blob/master/Help.md)。本项目独立实现，未复制其源码。关键 Windows API 依据：[WINDOWPLACEMENT](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-windowplacement)、[SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)、[IVirtualDesktopManager](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ivirtualdesktopmanager)。
+
+
